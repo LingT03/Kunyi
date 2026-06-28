@@ -1,4 +1,4 @@
-"""Unit tests for ankihelper.
+"""Unit tests for kunyi.
 
 Tests cover:
   - MCQCard construction and correct_answer validation
@@ -18,9 +18,9 @@ from pathlib import Path
 
 import pytest
 
-from ankihelper.card_types import BasicCard, MCQCard
-from ankihelper.deck import AnkiCardDeck
-from ankihelper.parsers import parse_json, parse_tsv
+from kunyi.card_types import BasicCard, MCQCard
+from kunyi.deck import AnkiCardDeck
+from kunyi.parsers import parse_json, parse_tsv
 
 
 # ---------------------------------------------------------------------------
