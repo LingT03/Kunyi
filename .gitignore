@@ -1,5 +1,6 @@
 # Data
 Calc2
+Exam2prep.json
 
 # Python
 __pycache__/
@@ -8,4 +9,5 @@ __pycache__/
 dist/
 build/
 .venv/
-*.apkg.DS_Store
+*.apkg
+.DS_Store
