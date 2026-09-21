@@ -12,17 +12,23 @@ _Part of the [Seya](https://github.com/LingT03/Seya) study ecosystem._
 pip install kunyi
 ```
 
-Or for local development:
+Or for local development, in a virtual environment:
 
 ```bash
 git clone https://github.com/LingT03/Kunyi.git
 cd Kunyi
-pip install -e .
+python -m venv .venv # recommended for isolation
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"
 ```
 
 ---
 
 ## CLI usage
+
+break down
+
+kunyi takes a deck name and a path to a JSON or TSV file containing card data, and produces an Anki `.apkg` file.
 
 ```bash
 # JSON — multiple-choice question cards
@@ -52,7 +58,11 @@ On failure a human-readable message is printed to stderr (exit 1).
   "cards": [
     {
       "question": "What does CPU stand for?",
-      "choices": ["Central Processing Unit", "Core Power Unit", "Control Processing Unit"],
+      "choices": [
+        "Central Processing Unit",
+        "Core Power Unit",
+        "Control Processing Unit"
+      ],
       "correct_answer": "Central Processing Unit",
       "explanation": "CPU stands for Central Processing Unit.",
       "tags": ["chapter-1"]
@@ -73,6 +83,49 @@ front	back
 What is spaced repetition?	A technique that spaces reviews over time.
 What is active recall?	Actively retrieving information from memory.
 ```
+
+---
+
+## Generating a JSON deck with an LLM
+
+The JSON format above is easy to produce by prompting an LLM directly on your source material (notes, a textbook chapter, a PDF transcript). Paste something like this, with your own source material and topic:
+
+```
+Generate Anki flashcards as JSON from the material below.
+
+Output ONLY valid JSON, no markdown code fences, matching this exact schema:
+
+{
+  "cards": [
+    {
+      "question": "string",
+      "choices": ["string", "string", "..."],
+      "correct_answer": "string",
+      "explanation": "string",
+      "tags": ["string", "..."]
+    }
+  ]
+}
+
+Rules:
+- "correct_answer" must be copied verbatim from one of the entries in "choices".
+- Each card needs 3-5 "choices".
+- "explanation" should justify the correct answer in 1-2 sentences.
+- "tags" is optional; use short topic labels (e.g. "chapter-3").
+- Generate one card per distinct concept — don't pad with trivial questions.
+
+Topic: <your topic>
+Source material:
+<paste your notes / textbook excerpt / transcript here>
+```
+
+Save the model's output to a `.json` file and run it straight through `kunyi`:
+
+```bash
+kunyi "My Deck" cards.json
+```
+
+`correct_answer` not matching an entry in `choices` verbatim is the most common failure mode — `kunyi` will reject the card with a `ValueError` at parse time rather than silently dropping it.
 
 ---
 
@@ -104,8 +157,9 @@ deck.save_deck(Path("output/my_deck.apkg"))
 
 ## Running tests
 
+With the `dev` extra installed (see Installation above):
+
 ```bash
-pip install pytest
 pytest tests/
 ```
 
