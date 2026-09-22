@@ -1,6 +1,12 @@
 # Data
 ROADMAP.md
 
+# local Anki decks
+cards/
+jsons/
+*.apkg
+
+
 # Python
 __pycache__/
 *.py[cod]
@@ -8,5 +14,4 @@ __pycache__/
 dist/
 build/
 .venv/
-*.apkg
 .DS_Store
