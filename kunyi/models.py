@@ -71,3 +71,35 @@ def mcq_model(model_id: int) -> genanki.Model:
             },
         ],
     )
+
+
+def cloze_model(model_id: int) -> genanki.Model:
+    """Return a genanki Model for ClozeCard (cloze deletion).
+
+    Parameters
+    ----------
+    model_id:
+        Unique integer ID for the model.
+
+    Returns
+    -------
+    genanki.Model
+        A cloze-type model: Text holds the {{c1::...}} deletions, Extra
+        holds optional context shown on the answer side.
+    """
+    return genanki.Model(
+        model_id,
+        "Cloze",
+        fields=[
+            {"name": "Text"},
+            {"name": "Extra"},
+        ],
+        templates=[
+            {
+                "name": "Cloze",
+                "qfmt": "{{cloze:Text}}",
+                "afmt": "{{cloze:Text}}<br>{{Extra}}",
+            },
+        ],
+        model_type=genanki.Model.CLOZE,
+    )

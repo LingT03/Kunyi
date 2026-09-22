@@ -7,8 +7,11 @@ directly to genanki.Note(tags=...) and genanki.Package(media_files=...).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
+
+_CLOZE_PATTERN = re.compile(r"\{\{c\d+::.+?\}\}", re.DOTALL)
 
 
 @dataclass
@@ -32,6 +35,13 @@ class BasicCard:
     back: str
     tags: list[str] = field(default_factory=list)
     media_paths: list[Path] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Validate that front and back are non-empty."""
+        if not self.front.strip():
+            raise ValueError("BasicCard.front cannot be empty")
+        if not self.back.strip():
+            raise ValueError("BasicCard.back cannot be empty")
 
 
 @dataclass
@@ -63,8 +73,48 @@ class MCQCard:
     media_paths: list[Path] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        """Validate that correct_answer is a member of choices."""
+        """Validate the question, choices, and correct_answer."""
+        if not self.question.strip():
+            raise ValueError("MCQCard.question cannot be empty")
+        if not self.choices:
+            raise ValueError("MCQCard.choices cannot be empty")
         if self.correct_answer not in self.choices:
             raise ValueError(
                 f"correct_answer {self.correct_answer!r} is not in choices: {self.choices}"
+            )
+
+
+@dataclass
+class ClozeCard:
+    """A cloze-deletion flashcard.
+
+    Parameters
+    ----------
+    text:
+        The card text containing one or more cloze deletions, using Anki's
+        syntax: ``{{c1::answer}}`` or ``{{c1::answer::hint}}``. Multiple
+        deletions in one note share the same text and are numbered
+        ``c1``, ``c2``, etc.
+    extra:
+        Optional context shown alongside the answer on the back of the card
+        (e.g. a fuller explanation).
+    tags:
+        Optional Anki tags attached to the note.
+    media_paths:
+        Optional paths to media files referenced by this card.
+    """
+
+    text: str
+    extra: str = ""
+    tags: list[str] = field(default_factory=list)
+    media_paths: list[Path] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Validate that text is non-empty and contains a cloze deletion."""
+        if not self.text.strip():
+            raise ValueError("ClozeCard.text cannot be empty")
+        if not _CLOZE_PATTERN.search(self.text):
+            raise ValueError(
+                "ClozeCard.text has no cloze deletion "
+                f"(expected e.g. '{{{{c1::answer}}}}'): {self.text!r}"
             )

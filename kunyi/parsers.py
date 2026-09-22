@@ -12,27 +12,35 @@ import csv
 import json
 from pathlib import Path
 
-from kunyi.card_types import BasicCard, MCQCard
+from kunyi.card_types import BasicCard, ClozeCard, MCQCard
 
 
-def parse_json(path: Path) -> list[MCQCard]:
-    """Parse a JSON file into a list of MCQCard objects.
+def parse_json(path: Path) -> list[MCQCard | ClozeCard]:
+    """Parse a JSON file into a list of MCQCard/ClozeCard objects.
 
     Expected schema::
 
         {
           "cards": [
             {
+              "type": "mcq",
               "question": "...",
               "choices": ["A", "B", "C", "D"],
               "correct_answer": "A",
               "explanation": "..."
+            },
+            {
+              "type": "cloze",
+              "text": "The mitochondria is the {{c1::powerhouse}} of the cell.",
+              "extra": "..."
             }
           ]
         }
 
-    The top-level "deck_name" key is ignored here; callers pass deck_name
-    separately so the parser stays stateless.
+    "type" is optional and defaults to "mcq" for backward compatibility
+    with files that predate cloze support. The top-level "deck_name" key is
+    ignored here; callers pass deck_name separately so the parser stays
+    stateless.
 
     Parameters
     ----------
@@ -41,7 +49,7 @@ def parse_json(path: Path) -> list[MCQCard]:
 
     Returns
     -------
-    list[MCQCard]
+    list[MCQCard | ClozeCard]
         Parsed and validated card objects.
 
     Raises
@@ -49,22 +57,36 @@ def parse_json(path: Path) -> list[MCQCard]:
     KeyError
         If a required field is missing from a card entry.
     ValueError
-        If correct_answer is not in choices (propagated from MCQCard).
+        If a card entry has an unrecognised "type", or fails validation
+        (e.g. correct_answer not in choices, or cloze text has no
+        deletion) — propagated from the card dataclasses.
     """
     with path.open(encoding="utf-8") as fh:
         data: dict = json.load(fh)
 
-    cards: list[MCQCard] = []
+    cards: list[MCQCard | ClozeCard] = []
     for entry in data["cards"]:
-        cards.append(
-            MCQCard(
-                question=entry["question"],
-                choices=entry["choices"],
-                correct_answer=entry["correct_answer"],
-                explanation=entry["explanation"],
-                tags=entry.get("tags", []),
+        card_type = entry.get("type", "mcq")
+        if card_type == "mcq":
+            cards.append(
+                MCQCard(
+                    question=entry["question"],
+                    choices=entry["choices"],
+                    correct_answer=entry["correct_answer"],
+                    explanation=entry["explanation"],
+                    tags=entry.get("tags", []),
+                )
             )
-        )
+        elif card_type == "cloze":
+            cards.append(
+                ClozeCard(
+                    text=entry["text"],
+                    extra=entry.get("extra", ""),
+                    tags=entry.get("tags", []),
+                )
+            )
+        else:
+            raise ValueError(f"Unknown card type {card_type!r} (expected 'mcq' or 'cloze')")
     return cards
 
 

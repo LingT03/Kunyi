@@ -19,9 +19,10 @@ import argparse
 import sys
 from pathlib import Path
 
-from kunyi.card_types import BasicCard, MCQCard
+from kunyi.card_types import BasicCard, ClozeCard, MCQCard
 from kunyi.deck import AnkiCardDeck
 from kunyi.parsers import parse_json, parse_tsv
+from kunyi.presets import PRESETS
 
 
 def _detect_format(path: Path) -> str:
@@ -97,6 +98,16 @@ def main() -> None:
             "Defaults to <deck_name>.apkg in the current directory."
         ),
     )
+    parser.add_argument(
+        "--preset",
+        choices=sorted(PRESETS),
+        default=None,
+        help=(
+            "Deck-options preset applied after building. 'exam_sprint' raises "
+            "Anki's daily new/review card limits so a freshly generated deck "
+            "isn't throttled by the default 20-new-cards-per-day cap."
+        ),
+    )
 
     args = parser.parse_args()
     input_path = Path(args.input_file)
@@ -111,7 +122,7 @@ def main() -> None:
     # Parse input file.
     try:
         if fmt == "json":
-            cards: list[BasicCard | MCQCard] = parse_json(input_path)
+            cards: list[BasicCard | MCQCard | ClozeCard] = parse_json(input_path)
         else:
             cards = parse_tsv(input_path)
     except FileNotFoundError:
@@ -129,7 +140,7 @@ def main() -> None:
         deck = AnkiCardDeck(deck_name=args.deck_name)
         for card in cards:
             deck.add_card(card)
-        deck.save_deck(output_path)
+        deck.save_deck(output_path, preset=args.preset)
     except Exception as exc:  # noqa: BLE001
         print(f"error: failed to write deck: {exc}", file=sys.stderr)
         sys.exit(1)

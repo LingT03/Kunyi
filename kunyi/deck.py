@@ -14,10 +14,11 @@ from typing import Union
 
 import genanki
 
-from kunyi.card_types import BasicCard, MCQCard
-from kunyi.models import basic_model, mcq_model
+from kunyi.card_types import BasicCard, ClozeCard, MCQCard
+from kunyi.models import basic_model, cloze_model, mcq_model
+from kunyi.presets import apply_preset
 
-Card = Union[BasicCard, MCQCard]
+Card = Union[BasicCard, MCQCard, ClozeCard]
 
 
 class AnkiCardDeck:
@@ -52,6 +53,7 @@ class AnkiCardDeck:
         # Derive stable model IDs from deck_id so they travel together.
         self._basic_model: genanki.Model = basic_model(self.deck_id + 1)
         self._mcq_model: genanki.Model = mcq_model(self.deck_id + 2)
+        self._cloze_model: genanki.Model = cloze_model(self.deck_id + 3)
 
         self._deck: genanki.Deck = genanki.Deck(self.deck_id, self.deck_name)
         self._media_files: list[str] = []
@@ -79,6 +81,8 @@ class AnkiCardDeck:
             note = self._build_basic_note(card)
         elif isinstance(card, MCQCard):
             note = self._build_mcq_note(card)
+        elif isinstance(card, ClozeCard):
+            note = self._build_cloze_note(card)
         else:
             raise TypeError(f"Unsupported card type: {type(card)!r}")
 
@@ -88,7 +92,7 @@ class AnkiCardDeck:
         for media_path in card.media_paths:
             self._media_files.append(str(media_path))
 
-    def save_deck(self, output_path: Path) -> None:
+    def save_deck(self, output_path: Path, preset: str | None = None) -> None:
         """Write the deck to an .apkg file.
 
         Parameters
@@ -96,6 +100,12 @@ class AnkiCardDeck:
         output_path:
             Destination path for the .apkg file. Parent directories must
             already exist; callers are responsible for creation.
+        preset:
+            Optional deck-options preset name (see kunyi.presets.PRESETS)
+            applied after writing, e.g. "exam_sprint" raises Anki's daily
+            new/review card limits so a freshly generated deck isn't
+            throttled by the default 20-new-cards-per-day cap. None (the
+            default) leaves Anki's defaults untouched.
         """
         package = genanki.Package(self._deck)
         # Media wiring: reserved for future use. Files are registered here
@@ -105,6 +115,9 @@ class AnkiCardDeck:
             package.media_files = self._media_files
 
         package.write_to_file(str(output_path))
+
+        if preset is not None:
+            apply_preset(output_path, preset)
 
     # ------------------------------------------------------------------
     # Private note builders
@@ -152,6 +165,25 @@ class AnkiCardDeck:
                 self._format_mcq_front(card),
                 self._format_mcq_back(card),
             ],
+            tags=card.tags,
+        )
+
+    def _build_cloze_note(self, card: ClozeCard) -> genanki.Note:
+        """Construct a genanki Note from a ClozeCard.
+
+        Parameters
+        ----------
+        card:
+            Source ClozeCard.
+
+        Returns
+        -------
+        genanki.Note
+            Note bound to the cloze model with Text and Extra fields.
+        """
+        return genanki.Note(
+            model=self._cloze_model,
+            fields=[card.text, card.extra],
             tags=card.tags,
         )
 
