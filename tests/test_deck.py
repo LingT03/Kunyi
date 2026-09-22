@@ -12,15 +12,17 @@ Tests cover:
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import zipfile
 from pathlib import Path
 
 import pytest
 
-from kunyi.card_types import BasicCard, MCQCard
+from kunyi.card_types import BasicCard, ClozeCard, MCQCard
 from kunyi.deck import AnkiCardDeck
 from kunyi.parsers import parse_json, parse_tsv
+from kunyi.presets import PRESETS, apply_preset
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +43,14 @@ def valid_mcq() -> MCQCard:
 @pytest.fixture
 def valid_basic() -> BasicCard:
     return BasicCard(front="What is spaced repetition?", back="A technique that spaces reviews.")
+
+
+@pytest.fixture
+def valid_cloze() -> ClozeCard:
+    return ClozeCard(
+        text="The mitochondria is the {{c1::powerhouse}} of the cell.",
+        extra="Mitochondria generate ATP via oxidative phosphorylation.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +85,14 @@ class TestMCQCard:
         )
         assert card.tags == ["exam", "chapter-1"]
 
+    def test_empty_question_raises(self) -> None:
+        with pytest.raises(ValueError, match="question cannot be empty"):
+            MCQCard(question="   ", choices=["A"], correct_answer="A", explanation=".")
+
+    def test_empty_choices_raises(self) -> None:
+        with pytest.raises(ValueError, match="choices cannot be empty"):
+            MCQCard(question="Q?", choices=[], correct_answer="A", explanation=".")
+
 
 # ---------------------------------------------------------------------------
 # BasicCard
@@ -87,6 +105,38 @@ class TestBasicCard:
         assert valid_basic.back == "A technique that spaces reviews."
         assert valid_basic.tags == []
         assert valid_basic.media_paths == []
+
+    def test_empty_front_raises(self) -> None:
+        with pytest.raises(ValueError, match="front cannot be empty"):
+            BasicCard(front="  ", back="Answer")
+
+    def test_empty_back_raises(self) -> None:
+        with pytest.raises(ValueError, match="back cannot be empty"):
+            BasicCard(front="Question", back="")
+
+
+# ---------------------------------------------------------------------------
+# ClozeCard
+# ---------------------------------------------------------------------------
+
+
+class TestClozeCard:
+    def test_valid_construction(self, valid_cloze: ClozeCard) -> None:
+        assert "{{c1::powerhouse}}" in valid_cloze.text
+        assert valid_cloze.extra
+        assert valid_cloze.tags == []
+
+    def test_empty_text_raises(self) -> None:
+        with pytest.raises(ValueError, match="text cannot be empty"):
+            ClozeCard(text="   ")
+
+    def test_missing_cloze_deletion_raises(self) -> None:
+        with pytest.raises(ValueError, match="no cloze deletion"):
+            ClozeCard(text="This has no deletion markers at all.")
+
+    def test_multiple_deletions_allowed(self) -> None:
+        card = ClozeCard(text="{{c1::A}} and {{c2::B}} are both deletions.")
+        assert card.text
 
 
 # ---------------------------------------------------------------------------
@@ -122,12 +172,15 @@ class TestMCQFormatting:
 
 
 class TestAnkiCardDeck:
-    def test_save_deck_creates_apkg(self, valid_mcq: MCQCard, valid_basic: BasicCard) -> None:
+    def test_save_deck_creates_apkg(
+        self, valid_mcq: MCQCard, valid_basic: BasicCard, valid_cloze: ClozeCard
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "test.apkg"
             deck = AnkiCardDeck(deck_name="Test Deck", deck_id=99999001)
             deck.add_card(valid_mcq)
             deck.add_card(valid_basic)
+            deck.add_card(valid_cloze)
             deck.save_deck(output)
 
             assert output.exists()
@@ -138,6 +191,24 @@ class TestAnkiCardDeck:
         deck = AnkiCardDeck(deck_name="Test", deck_id=99999002)
         with pytest.raises(TypeError, match="Unsupported card type"):
             deck.add_card("not a card")  # type: ignore[arg-type]
+
+    def test_save_deck_with_preset_applies_limits(self, valid_cloze: ClozeCard) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "test.apkg"
+            deck = AnkiCardDeck(deck_name="Cram Deck", deck_id=99999003)
+            deck.add_card(valid_cloze)
+            deck.save_deck(output, preset="exam_sprint")
+
+            with tempfile.TemporaryDirectory() as extract_dir:
+                with zipfile.ZipFile(output) as zf:
+                    zf.extractall(extract_dir)
+                conn = sqlite3.connect(Path(extract_dir) / "collection.anki2")
+                (dconf_json,) = conn.execute("SELECT dconf FROM col").fetchone()
+                conn.close()
+                dconf = json.loads(dconf_json)
+                for group in dconf.values():
+                    assert group["new"]["perDay"] == 9999
+                    assert group["rev"]["perDay"] == 9999
 
 
 # ---------------------------------------------------------------------------
@@ -211,3 +282,84 @@ class TestParseJSON:
         p.write_text(json.dumps(data), encoding="utf-8")
         with pytest.raises(KeyError):
             parse_json(p)
+
+    def test_defaults_to_mcq_without_type(self, tmp_path: Path) -> None:
+        data = {
+            "cards": [
+                {
+                    "question": "Q1?",
+                    "choices": ["A", "B"],
+                    "correct_answer": "A",
+                    "explanation": "Because A.",
+                }
+            ]
+        }
+        p = tmp_path / "cards.json"
+        p.write_text(json.dumps(data), encoding="utf-8")
+        cards = parse_json(p)
+        assert isinstance(cards[0], MCQCard)
+
+    def test_parses_cloze_cards(self, tmp_path: Path) -> None:
+        data = {
+            "cards": [
+                {
+                    "type": "cloze",
+                    "text": "The powerhouse of the cell is the {{c1::mitochondria}}.",
+                    "extra": "Generates ATP.",
+                    "tags": ["biology"],
+                }
+            ]
+        }
+        p = tmp_path / "cloze.json"
+        p.write_text(json.dumps(data), encoding="utf-8")
+        cards = parse_json(p)
+        assert len(cards) == 1
+        assert isinstance(cards[0], ClozeCard)
+        assert "{{c1::mitochondria}}" in cards[0].text
+        assert cards[0].extra == "Generates ATP."
+        assert cards[0].tags == ["biology"]
+
+    def test_mixed_types_in_one_file(self, tmp_path: Path) -> None:
+        data = {
+            "cards": [
+                {
+                    "type": "mcq",
+                    "question": "Q?",
+                    "choices": ["A", "B"],
+                    "correct_answer": "A",
+                    "explanation": ".",
+                },
+                {"type": "cloze", "text": "{{c1::Answer}} here."},
+            ]
+        }
+        p = tmp_path / "mixed.json"
+        p.write_text(json.dumps(data), encoding="utf-8")
+        cards = parse_json(p)
+        assert isinstance(cards[0], MCQCard)
+        assert isinstance(cards[1], ClozeCard)
+
+    def test_unknown_type_raises(self, tmp_path: Path) -> None:
+        data = {"cards": [{"type": "flashcard-supreme", "text": "..."}]}
+        p = tmp_path / "bad_type.json"
+        p.write_text(json.dumps(data), encoding="utf-8")
+        with pytest.raises(ValueError, match="Unknown card type"):
+            parse_json(p)
+
+
+# ---------------------------------------------------------------------------
+# Deck-option presets
+# ---------------------------------------------------------------------------
+
+
+class TestPresets:
+    def test_unknown_preset_raises(self, valid_cloze: ClozeCard) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "test.apkg"
+            deck = AnkiCardDeck(deck_name="Test", deck_id=99999004)
+            deck.add_card(valid_cloze)
+            deck.save_deck(output)
+            with pytest.raises(KeyError, match="Unknown preset"):
+                apply_preset(output, "not_a_real_preset")
+
+    def test_exam_sprint_is_a_known_preset(self) -> None:
+        assert "exam_sprint" in PRESETS
