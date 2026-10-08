@@ -3,6 +3,7 @@
 Usage
 -----
     kunyi <deck_name> <input_file> [--format {json,tsv}] [--output PATH]
+          [--preset NAME] [--push]
 
 On success:  the resolved output path is printed to stdout, exit 0.
 On failure:  a human-readable message is printed to stderr, exit 1.
@@ -19,6 +20,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from kunyi.ankiconnect import AnkiConnectError, import_package
 from kunyi.card_types import BasicCard, ClozeCard, MCQCard
 from kunyi.deck import AnkiCardDeck
 from kunyi.parsers import parse_json, parse_tsv
@@ -108,6 +110,15 @@ def main() -> None:
             "isn't throttled by the default 20-new-cards-per-day cap."
         ),
     )
+    parser.add_argument(
+        "--push",
+        action="store_true",
+        help=(
+            "After building, import the .apkg into the running Anki via the "
+            "AnkiConnect add-on, updating existing cards in place. Requires "
+            "Anki to be open with AnkiConnect installed."
+        ),
+    )
 
     args = parser.parse_args()
     input_path = Path(args.input_file)
@@ -144,6 +155,17 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         print(f"error: failed to write deck: {exc}", file=sys.stderr)
         sys.exit(1)
+
+    if args.push:
+        try:
+            import_package(output_path)
+        except AnkiConnectError as exc:
+            print(
+                f"error: deck written to {output_path.resolve()} but not pushed to Anki: {exc}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"pushed {len(cards)} notes to Anki deck {args.deck_name!r}", file=sys.stderr)
 
     # Print resolved path to stdout for subprocess callers.
     print(output_path.resolve())
