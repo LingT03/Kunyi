@@ -24,6 +24,7 @@ def parse_json(path: Path) -> list[MCQCard | ClozeCard]:
           "cards": [
             {
               "type": "mcq",
+              "id": "basics-001",
               "question": "...",
               "choices": ["A", "B", "C", "D"],
               "correct_answer": "A",
@@ -31,6 +32,7 @@ def parse_json(path: Path) -> list[MCQCard | ClozeCard]:
             },
             {
               "type": "cloze",
+              "id": "basics-002",
               "text": "The mitochondria is the {{c1::powerhouse}} of the cell.",
               "extra": "..."
             }
@@ -41,6 +43,15 @@ def parse_json(path: Path) -> list[MCQCard | ClozeCard]:
     with files that predate cloze support. The top-level "deck_name" key is
     ignored here; callers pass deck_name separately so the parser stays
     stateless.
+
+    "id" is optional. When present, it is carried onto the parsed card as
+    ``note_id`` and used by kunyi.deck.AnkiCardDeck to keep this card's Anki
+    note identity stable across regenerations even if cards are reordered
+    or inserted/removed elsewhere in the file. Cards without an "id" still
+    get a stable identity based on their position in the file, which is
+    enough for in-place edits as long as the file's card order doesn't
+    change — but an explicit "id" is recommended for any deck you plan to
+    keep editing over time.
 
     Parameters
     ----------
@@ -67,6 +78,7 @@ def parse_json(path: Path) -> list[MCQCard | ClozeCard]:
     cards: list[MCQCard | ClozeCard] = []
     for entry in data["cards"]:
         card_type = entry.get("type", "mcq")
+        note_id = entry.get("id")
         if card_type == "mcq":
             cards.append(
                 MCQCard(
@@ -75,6 +87,7 @@ def parse_json(path: Path) -> list[MCQCard | ClozeCard]:
                     correct_answer=entry["correct_answer"],
                     explanation=entry["explanation"],
                     tags=entry.get("tags", []),
+                    note_id=note_id,
                 )
             )
         elif card_type == "cloze":
@@ -83,6 +96,7 @@ def parse_json(path: Path) -> list[MCQCard | ClozeCard]:
                     text=entry["text"],
                     extra=entry.get("extra", ""),
                     tags=entry.get("tags", []),
+                    note_id=note_id,
                 )
             )
         else:

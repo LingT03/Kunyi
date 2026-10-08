@@ -29,12 +29,21 @@ class BasicCard:
     media_paths:
         Optional paths to media files (images, audio) referenced by this card.
         Collected at deck-save time and registered with the genanki Package.
+    note_id:
+        Optional stable identifier for this card (e.g. "basics-012"). When
+        set, kunyi.deck.AnkiCardDeck uses it to keep this card's Anki note
+        identity fixed across regenerations of the same deck, even if the
+        card is later reordered or other cards are inserted/removed around
+        it. If omitted, identity falls back to the card's position within
+        the file, which is only stable as long as that position doesn't
+        change. See AnkiCardDeck._note_guid for details.
     """
 
     front: str
     back: str
     tags: list[str] = field(default_factory=list)
     media_paths: list[Path] = field(default_factory=list)
+    note_id: str | None = None
 
     def __post_init__(self) -> None:
         """Validate that front and back are non-empty."""
@@ -63,6 +72,10 @@ class MCQCard:
         Optional Anki tags attached to the note.
     media_paths:
         Optional paths to media files referenced by this card.
+    note_id:
+        Optional stable identifier for this card. See BasicCard.note_id for
+        the full explanation of how kunyi uses it to preserve Anki note
+        identity across regenerations.
     """
 
     question: str
@@ -71,6 +84,7 @@ class MCQCard:
     explanation: str
     tags: list[str] = field(default_factory=list)
     media_paths: list[Path] = field(default_factory=list)
+    note_id: str | None = None
 
     def __post_init__(self) -> None:
         """Validate the question, choices, and correct_answer."""
@@ -102,12 +116,17 @@ class ClozeCard:
         Optional Anki tags attached to the note.
     media_paths:
         Optional paths to media files referenced by this card.
+    note_id:
+        Optional stable identifier for this card. See BasicCard.note_id for
+        the full explanation of how kunyi uses it to preserve Anki note
+        identity across regenerations.
     """
 
     text: str
     extra: str = ""
     tags: list[str] = field(default_factory=list)
     media_paths: list[Path] = field(default_factory=list)
+    note_id: str | None = None
 
     def __post_init__(self) -> None:
         """Validate that text is non-empty and contains a cloze deletion."""
