@@ -45,6 +45,9 @@ kunyi "My Deck" cards.data --format tsv
 
 # Raise Anki's daily new/review card limits for a cram session
 kunyi "Exam 1 Cram" cards.json --preset exam_sprint
+
+# Build and import straight into the running Anki (see "Updating a deck in Anki")
+kunyi "Cloud Computing" cards.json --push
 ```
 
 On success the resolved `.apkg` path is printed to stdout (exit 0).  
@@ -94,6 +97,11 @@ syntax — `{{c1::answer}}`, or `{{c1::answer::hint}}` for a hint. Use `c1`,
 one note but reviewed as separate cards. `extra` is optional context shown
 on the answer side. `tags` is optional.
 
+**`id` (both types, optional):** a short string that is unique within the
+deck, e.g. `"id": "ch1-003"`. It pins the card's identity in Anki so the card
+keeps its review history when you edit, reorder, insert, or remove cards — see
+[Updating a deck in Anki](#updating-a-deck-in-anki).
+
 Malformed cards (missing a required field, `correct_answer` not in
 `choices`, `text` with no `{{cN::...}}` deletion, or empty `front`/`back`/
 `question`/`text`) are rejected with a clear error at parse time rather than
@@ -108,6 +116,42 @@ front	back
 What is spaced repetition?	A technique that spaces reviews over time.
 What is active recall?	Actively retrieving information from memory.
 ```
+
+---
+
+## Updating a deck in Anki
+
+Rebuilding a deck and importing it again updates the cards already in Anki
+instead of duplicating them, and keeps their review history. This works
+because identities are derived from names rather than from content or time:
+
+- The deck is identified by its **deck name**. Rebuild with exactly the same
+  name; a different name is a different deck.
+- Each card is identified by its `"id"` if it has one, otherwise by its
+  **position** in the file.
+
+Without `"id"`s, editing a card's text is safe, but inserting, removing, or
+reordering cards shifts every later card onto its neighbour's review history.
+Give cards an `"id"` if you expect the file's structure to change. Adding or
+changing an `"id"` later makes Anki see that card as new.
+
+Importing never deletes: a card removed from the file stays in Anki until you
+delete it there.
+
+### One-command updates with `--push`
+
+`--push` imports the built `.apkg` into Anki for you through the
+[AnkiConnect](https://ankiweb.net/shared/info/2055492159) add-on. One-time
+setup: in Anki, **Tools → Add-ons → Get Add-ons…**, enter code `2055492159`,
+and restart Anki. Then, with Anki open:
+
+```bash
+kunyi "Cloud Computing" cards.json --output decks/cloud.apkg --push
+```
+
+If Anki isn't running or the add-on is missing, the `.apkg` is still written
+and kunyi exits 1 with a message on stderr. Without `--push`, import the
+`.apkg` by hand (**File → Import**) for the same update-in-place behaviour.
 
 ---
 
