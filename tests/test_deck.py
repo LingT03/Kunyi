@@ -7,18 +7,23 @@ Tests cover:
   - AnkiCardDeck.save_deck() writes a valid .apkg to a temp directory
   - parse_tsv() with and without a header row
   - parse_json() round-trip
+  - Stable deck ids and content-independent note guids across regenerations
+  - AnkiConnect client request shape and error handling
 """
 
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 import tempfile
+import urllib.error
 import zipfile
 from pathlib import Path
 
 import pytest
 
+from kunyi import ankiconnect
 from kunyi.card_types import BasicCard, ClozeCard, MCQCard
 from kunyi.deck import AnkiCardDeck
 from kunyi.parsers import parse_json, parse_tsv
@@ -345,6 +350,26 @@ class TestParseJSON:
         with pytest.raises(ValueError, match="Unknown card type"):
             parse_json(p)
 
+    def test_optional_id_becomes_note_id(self, tmp_path: Path) -> None:
+        data = {
+            "cards": [
+                {
+                    "type": "mcq",
+                    "id": "basics-001",
+                    "question": "Q?",
+                    "choices": ["A", "B"],
+                    "correct_answer": "A",
+                    "explanation": ".",
+                },
+                {"type": "cloze", "id": "basics-002", "text": "{{c1::Answer}} here."},
+                {"type": "cloze", "text": "{{c1::No id}} here."},
+            ]
+        }
+        p = tmp_path / "ids.json"
+        p.write_text(json.dumps(data), encoding="utf-8")
+        cards = parse_json(p)
+        assert [c.note_id for c in cards] == ["basics-001", "basics-002", None]
+
 
 # ---------------------------------------------------------------------------
 # Deck-option presets
@@ -363,3 +388,139 @@ class TestPresets:
 
     def test_exam_sprint_is_a_known_preset(self) -> None:
         assert "exam_sprint" in PRESETS
+
+
+# ---------------------------------------------------------------------------
+# Stable identity across regenerations
+# ---------------------------------------------------------------------------
+
+
+def _guids(deck: AnkiCardDeck) -> list[str]:
+    return [note.guid for note in deck._deck.notes]
+
+
+def _build(name: str, cards: list) -> AnkiCardDeck:
+    deck = AnkiCardDeck(deck_name=name)
+    for card in cards:
+        deck.add_card(card)
+    return deck
+
+
+class TestStableIdentity:
+    def test_default_deck_id_is_deterministic(self) -> None:
+        assert AnkiCardDeck("Probability Basics").deck_id == AnkiCardDeck("Probability Basics").deck_id
+
+    def test_default_deck_id_differs_by_name(self) -> None:
+        assert AnkiCardDeck("Probability Basics").deck_id != AnkiCardDeck("Stats & ML Basics").deck_id
+
+    def test_explicit_deck_id_overrides_default(self) -> None:
+        assert AnkiCardDeck("Probability Basics", deck_id=99999005).deck_id == 99999005
+
+    def test_guid_survives_content_edit_by_position(self) -> None:
+        before = _build("D", [ClozeCard(text="{{c1::Old}} wording.")])
+        after = _build("D", [ClozeCard(text="{{c1::New}} wording, fixed typo.")])
+        assert _guids(before) == _guids(after)
+
+    def test_guid_survives_content_edit_and_reorder_with_note_id(self) -> None:
+        before = _build(
+            "D",
+            [
+                ClozeCard(text="{{c1::First}}.", note_id="a"),
+                ClozeCard(text="{{c1::Second}}.", note_id="b"),
+            ],
+        )
+        after = _build(
+            "D",
+            [
+                ClozeCard(text="{{c1::Second}}, edited.", note_id="b"),
+                ClozeCard(text="{{c1::Inserted}}.", note_id="c"),
+                ClozeCard(text="{{c1::First}}, edited.", note_id="a"),
+            ],
+        )
+        a, b = _guids(before)
+        assert _guids(after)[2] == a
+        assert _guids(after)[0] == b
+
+    def test_guids_are_unique_within_a_deck(self) -> None:
+        deck = _build("D", [ClozeCard(text="{{c1::Same}} text.") for _ in range(5)])
+        assert len(set(_guids(deck))) == 5
+
+    def test_card_type_disambiguates_same_position(self) -> None:
+        basic = _build("D", [BasicCard(front="Q", back="A")])
+        cloze = _build("D", [ClozeCard(text="{{c1::A}}.")])
+        assert _guids(basic) != _guids(cloze)
+
+    def test_guids_differ_between_decks(self) -> None:
+        one = _build("Deck One", [ClozeCard(text="{{c1::A}}.", note_id="x")])
+        two = _build("Deck Two", [ClozeCard(text="{{c1::A}}.", note_id="x")])
+        assert _guids(one) != _guids(two)
+
+    def test_regenerated_apkg_keeps_ids_when_one_card_is_edited(
+        self, tmp_path: Path, valid_mcq: MCQCard, valid_cloze: ClozeCard
+    ) -> None:
+        def build_and_read(name: str, cloze_text: str) -> tuple[list[str], list[int], list[int]]:
+            output = tmp_path / name
+            deck = _build("Regen Deck", [valid_mcq, ClozeCard(text=cloze_text), valid_cloze])
+            deck.save_deck(output)
+            with zipfile.ZipFile(output) as zf:
+                zf.extract("collection.anki2", tmp_path / name.replace(".apkg", ""))
+            conn = sqlite3.connect(tmp_path / name.replace(".apkg", "") / "collection.anki2")
+            guids = [g for (g,) in conn.execute("SELECT guid FROM notes ORDER BY id")]
+            mids = [m for (m,) in conn.execute("SELECT mid FROM notes ORDER BY id")]
+            dids = [d for (d,) in conn.execute("SELECT DISTINCT did FROM cards")]
+            conn.close()
+            return guids, mids, dids
+
+        first = build_and_read("first.apkg", "A {{c1::typo}} here.")
+        second = build_and_read("second.apkg", "A {{c1::fixed}} here.")
+        assert first == second
+        assert len(set(first[0])) == 3
+
+
+# ---------------------------------------------------------------------------
+# AnkiConnect client
+# ---------------------------------------------------------------------------
+
+
+class TestAnkiConnect:
+    def _stub(self, monkeypatch: pytest.MonkeyPatch, reply: dict) -> list:
+        sent = []
+
+        def fake_urlopen(request, timeout=None):
+            sent.append(json.loads(request.data))
+            return io.BytesIO(json.dumps(reply).encode("utf-8"))
+
+        monkeypatch.setattr(ankiconnect.urllib.request, "urlopen", fake_urlopen)
+        return sent
+
+    def test_import_package_sends_absolute_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        sent = self._stub(monkeypatch, {"result": True, "error": None})
+        monkeypatch.chdir(tmp_path)
+        ankiconnect.import_package(Path("deck.apkg"))
+        assert sent == [
+            {
+                "action": "importPackage",
+                "version": 6,
+                "params": {"path": str((tmp_path / "deck.apkg").resolve())},
+            }
+        ]
+
+    def test_error_reply_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._stub(monkeypatch, {"result": None, "error": "boom"})
+        with pytest.raises(ankiconnect.AnkiConnectError, match="boom"):
+            ankiconnect.import_package(Path("deck.apkg"))
+
+    def test_false_result_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._stub(monkeypatch, {"result": False, "error": None})
+        with pytest.raises(ankiconnect.AnkiConnectError, match="did not accept"):
+            ankiconnect.import_package(Path("deck.apkg"))
+
+    def test_unreachable_raises_helpful_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def refuse(request, timeout=None):
+            raise urllib.error.URLError("Connection refused")
+
+        monkeypatch.setattr(ankiconnect.urllib.request, "urlopen", refuse)
+        with pytest.raises(ankiconnect.AnkiConnectError, match="Is Anki running"):
+            ankiconnect.import_package(Path("deck.apkg"))
