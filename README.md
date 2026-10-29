@@ -107,6 +107,61 @@ Malformed cards (missing a required field, `correct_answer` not in
 `question`/`text`) are rejected with a clear error at parse time rather than
 silently producing a broken card.
 
+### JSON schema v2 — question/answer cards, card kinds, lint
+
+Schema v2 (`"schema_version": 2`) keeps everything above and adds:
+
+- **`"type": "qa"`** — open-response cards: `prompt`, `answer` (the minimum
+  response that counts as correct), optional `grading` (a list of pass
+  criteria shown under the answer). These are the default for anything you
+  should be able to *produce*: definitions, "why" questions, examples and
+  counterexamples, short computations.
+- **MCQs as `answer` + `distractors`** — each distractor may carry a
+  `why_wrong`. Choices are always **shuffled at render time** (seeded by the
+  note's guid, so a rebuild never reorders a card you have seen) and lettered
+  A–D. The legacy `choices` + `correct_answer` form is still accepted and is
+  shuffled the same way.
+- **Shared metadata on every card:** `id` (stable identity), `concept`
+  (groups cards about one idea), `kind` — one of `recall`, `explain`,
+  `apply`, `construct`, `compute`, `discriminate`, added to the note as a
+  `kind::<kind>` tag — `explanation` (feedback shown after the answer) and
+  `source` (citation, rendered small as metadata rather than as the
+  explanation).
+- **`guid`** (optional) pins a note to the exact Anki identity it already has,
+  e.g. when migrating cards that were identified by position.
+- **`"retired"`** (top-level, optional) — notes a refactor replaced. They are
+  emitted unchanged except for a `kunyi::retired` tag; after importing, search
+  `tag:kunyi::retired` in Anki's browser and delete them.
+
+```json
+{
+  "schema_version": 2,
+  "cards": [
+    {"type": "qa", "id": "la.ker.def", "concept": "kernel", "kind": "recall",
+     "prompt": "Define ker(T) for T: V -> W. Domain or codomain?",
+     "answer": "{v in V : T(v) = 0}; a subspace of the domain V.",
+     "grading": ["Correct set", "Says domain"],
+     "explanation": "Inputs that map to zero live where inputs live.",
+     "source": "Johnston, Def. 1.2.5"},
+    {"type": "mcq", "id": "la.diag.iff", "kind": "discriminate",
+     "question": "Which condition is necessary and sufficient for diagonalizability?",
+     "answer": "F^n has a basis of eigenvectors of A",
+     "distractors": [{"text": "A has n distinct eigenvalues",
+                      "why_wrong": "Sufficient, not necessary (I_n)."}],
+     "explanation": "Enough eigenvectors for a basis is exactly diagonalizability."}
+  ]
+}
+```
+
+**Lint.** `kunyi-lint jsons/*.json` (or `python -m kunyi.lint ...`) checks
+the defects that make a card measure something other than recall: missing
+ids, citation-only explanations, cloze answers repeated outside the
+deletion, restatements after a deletion, too many or too long deletions, TeX
+`}}` collisions inside a deletion (which break MathJax in Anki), MCQ keys
+that are much longer than the distractors or contain their own
+justification, asymmetric absolute words, yes/no prompts, and near-duplicate
+cards across files. Errors exit 1; warnings are for review.
+
 ### TSV — basic cards
 
 Tab-delimited UTF-8. Optional header row (`front\tback`) is auto-detected and skipped.

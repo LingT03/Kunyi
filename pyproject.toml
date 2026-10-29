@@ -21,6 +21,7 @@ Changelog = "https://github.com/LingT03/Kunyi/releases"
 
 [project.scripts]
 kunyi = "kunyi.__main__:main"
+kunyi-lint = "kunyi.lint:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["kunyi"]
