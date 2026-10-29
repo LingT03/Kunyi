@@ -2,7 +2,7 @@
 
 Each parser reads a file and returns a list of typed card objects.
 Supported formats:
-  - JSON: MCQCard list (see README for schema)
+  - JSON: QA, MCQ and cloze cards, schema v1 or v2 (see README)
   - TSV:  BasicCard list with columns front<TAB>back (optional header row)
 """
 
@@ -11,47 +11,142 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
+from typing import Any, Union
 
 from kunyi.card_types import BasicCard, ClozeCard, MCQCard
 
 
-def parse_json(path: Path) -> list[MCQCard | ClozeCard]:
-    """Parse a JSON file into a list of MCQCard/ClozeCard objects.
+RETIRED_TAG = "kunyi::retired"
 
-    Expected schema::
+_Card = Union[BasicCard, MCQCard, ClozeCard]
+
+
+def _common(entry: dict[str, Any]) -> dict[str, Any]:
+    """Extract the metadata keys shared by every card type.
+
+    Parameters
+    ----------
+    entry:
+        One card object from the JSON file.
+
+    Returns
+    -------
+    dict[str, Any]
+        Keyword arguments for the card dataclass constructors.
+    """
+    return {
+        "tags": list(entry.get("tags", [])),
+        "note_id": entry.get("id"),
+        "guid": entry.get("guid"),
+        "concept": entry.get("concept"),
+        "kind": entry.get("kind"),
+        "source": entry.get("source", ""),
+    }
+
+
+def _parse_entry(entry: dict[str, Any]) -> _Card:
+    """Build one card object from a JSON entry (schema v1 or v2).
+
+    Parameters
+    ----------
+    entry:
+        One card object. ``type`` defaults to ``"mcq"`` for v1 files.
+
+    Returns
+    -------
+    BasicCard | MCQCard | ClozeCard
+        The validated card.
+
+    Raises
+    ------
+    KeyError
+        If a required field is missing.
+    ValueError
+        If ``type`` is unknown or the dataclass validation fails.
+    """
+    card_type = entry.get("type", "mcq")
+    common = _common(entry)
+    if card_type == "mcq":
+        question = entry.get("question", entry.get("prompt"))
+        if question is None:
+            raise KeyError("question")
+        if "answer" in entry and "distractors" in entry:
+            # v2: key and distractors stored apart, so authoring order can
+            # never leak the answer; rendering shuffles them together.
+            distractors = entry["distractors"]
+            texts = [d["text"] if isinstance(d, dict) else d for d in distractors]
+            notes = {
+                d["text"]: d["why_wrong"]
+                for d in distractors
+                if isinstance(d, dict) and d.get("why_wrong")
+            }
+            return MCQCard(
+                question=question,
+                choices=[entry["answer"], *texts],
+                correct_answer=entry["answer"],
+                explanation=entry["explanation"],
+                distractor_notes=notes,
+                **common,
+            )
+        return MCQCard(
+            question=question,
+            choices=entry["choices"],
+            correct_answer=entry["correct_answer"],
+            explanation=entry["explanation"],
+            **common,
+        )
+    if card_type == "cloze":
+        return ClozeCard(
+            text=entry["text"],
+            explanation=entry.get("explanation", ""),
+            extra=entry.get("extra", ""),
+            **common,
+        )
+    if card_type in {"qa", "basic"}:
+        return BasicCard(
+            front=entry.get("prompt", entry.get("front", "")),
+            back=entry.get("answer", entry.get("back", "")),
+            grading=list(entry.get("grading", [])),
+            explanation=entry.get("explanation", ""),
+            **common,
+        )
+    raise ValueError(f"Unknown card type {card_type!r} (expected 'qa', 'mcq' or 'cloze')")
+
+
+def parse_json(path: Path) -> list[_Card]:
+    """Parse a JSON deck file into card objects.
+
+    Accepts schema v1 (``mcq`` and ``cloze`` entries) and schema v2, which
+    adds ``qa`` cards, MCQs written as ``answer`` + ``distractors``, and the
+    shared metadata keys ``id``, ``guid``, ``concept``, ``kind``,
+    ``source`` and ``explanation``. Minimal v2 example::
 
         {
+          "schema_version": 2,
           "cards": [
-            {
-              "type": "mcq",
-              "id": "basics-001",
-              "question": "...",
-              "choices": ["A", "B", "C", "D"],
-              "correct_answer": "A",
-              "explanation": "..."
-            },
-            {
-              "type": "cloze",
-              "id": "basics-002",
-              "text": "The mitochondria is the {{c1::powerhouse}} of the cell.",
-              "extra": "..."
-            }
-          ]
+            {"type": "qa", "id": "la.ker.def", "kind": "recall",
+             "prompt": "Define ker(T) for T: V -> W.",
+             "answer": "{v in V : T(v) = 0}",
+             "grading": ["Inputs from V", "T(v) = 0 in W"],
+             "explanation": "The kernel lives in the domain.",
+             "source": "Johnston, Def. 1.3.1"},
+            {"type": "mcq", "id": "la.diag.mcq", "kind": "discriminate",
+             "question": "...", "answer": "...",
+             "distractors": [{"text": "...", "why_wrong": "..."}],
+             "explanation": "..."}
+          ],
+          "retired": [ ... ]
         }
 
-    "type" is optional and defaults to "mcq" for backward compatibility
-    with files that predate cloze support. The top-level "deck_name" key is
-    ignored here; callers pass deck_name separately so the parser stays
-    stateless.
+    ``retired`` (optional) lists notes that a refactor replaced. They are
+    still emitted, unchanged except for a ``kunyi::retired`` tag, so that
+    importing the deck tags the old notes in the learner's collection and
+    they can be deleted with one search (``tag:kunyi::retired``). Each
+    retired entry should carry the ``guid`` the note has in Anki.
 
-    "id" is optional. When present, it is carried onto the parsed card as
-    ``note_id`` and used by kunyi.deck.AnkiCardDeck to keep this card's Anki
-    note identity stable across regenerations even if cards are reordered
-    or inserted/removed elsewhere in the file. Cards without an "id" still
-    get a stable identity based on their position in the file, which is
-    enough for in-place edits as long as the file's card order doesn't
-    change — but an explicit "id" is recommended for any deck you plan to
-    keep editing over time.
+    "id" is optional but recommended: it keys the note guid (unless an
+    explicit "guid" is given), so edits and reordering keep the note's
+    review history. Without either, identity falls back to position.
 
     Parameters
     ----------
@@ -60,47 +155,25 @@ def parse_json(path: Path) -> list[MCQCard | ClozeCard]:
 
     Returns
     -------
-    list[MCQCard | ClozeCard]
-        Parsed and validated card objects.
+    list[BasicCard | MCQCard | ClozeCard]
+        Parsed and validated cards, followed by retired notes.
 
     Raises
     ------
     KeyError
         If a required field is missing from a card entry.
     ValueError
-        If a card entry has an unrecognised "type", or fails validation
-        (e.g. correct_answer not in choices, or cloze text has no
-        deletion) — propagated from the card dataclasses.
+        If a card entry has an unrecognised "type" or fails validation.
     """
     with path.open(encoding="utf-8") as fh:
-        data: dict = json.load(fh)
+        data: dict[str, Any] = json.load(fh)
 
-    cards: list[MCQCard | ClozeCard] = []
-    for entry in data["cards"]:
-        card_type = entry.get("type", "mcq")
-        note_id = entry.get("id")
-        if card_type == "mcq":
-            cards.append(
-                MCQCard(
-                    question=entry["question"],
-                    choices=entry["choices"],
-                    correct_answer=entry["correct_answer"],
-                    explanation=entry["explanation"],
-                    tags=entry.get("tags", []),
-                    note_id=note_id,
-                )
-            )
-        elif card_type == "cloze":
-            cards.append(
-                ClozeCard(
-                    text=entry["text"],
-                    extra=entry.get("extra", ""),
-                    tags=entry.get("tags", []),
-                    note_id=note_id,
-                )
-            )
-        else:
-            raise ValueError(f"Unknown card type {card_type!r} (expected 'mcq' or 'cloze')")
+    cards: list[_Card] = [_parse_entry(entry) for entry in data["cards"]]
+    for entry in data.get("retired", []):
+        card = _parse_entry(entry)
+        if RETIRED_TAG not in card.tags:
+            card.tags.append(RETIRED_TAG)
+        cards.append(card)
     return cards
 
 

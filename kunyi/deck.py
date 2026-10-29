@@ -8,6 +8,8 @@ ClozeCard objects via a single add_card() method and dispatches internally.
 from __future__ import annotations
 
 import hashlib
+import html
+import random
 from pathlib import Path
 from typing import Union
 
@@ -181,6 +183,10 @@ class AnkiCardDeck:
           stays stable even if cards are reordered or other cards are
           inserted/removed elsewhere in the file — the recommended path for
           any card you intend to keep editing over time.
+        - If the card carries an explicit ``guid`` it is used verbatim. This
+          pins a note to an identity it already has in a user's collection
+          (e.g. a migrated note originally identified by position), so its
+          review history survives renaming ``note_id`` or reordering.
         - Otherwise, the guid falls back to (deck_name, card_type,
           position-in-deck). This is stable across regenerations as long as
           the card's position doesn't change; inserting or removing an
@@ -200,6 +206,9 @@ class AnkiCardDeck:
         str
             A guid suitable for genanki.Note(guid=...).
         """
+        explicit_guid = getattr(card, "guid", None)
+        if explicit_guid:
+            return explicit_guid
         note_id = getattr(card, "note_id", None)
         seed = note_id if note_id else f"index:{self._next_index}"
         return genanki.guid_for(self.deck_name, card_type, seed)
@@ -221,8 +230,8 @@ class AnkiCardDeck:
         """
         return genanki.Note(
             model=self._basic_model,
-            fields=[card.front, card.back],
-            tags=card.tags,
+            fields=[card.front, self._format_basic_back(card)],
+            tags=self._note_tags(card),
             guid=guid,
         )
 
@@ -248,10 +257,10 @@ class AnkiCardDeck:
         return genanki.Note(
             model=self._mcq_model,
             fields=[
-                self._format_mcq_front(card),
-                self._format_mcq_back(card),
+                self._format_mcq_front(card, seed=guid),
+                self._format_mcq_back(card, seed=guid),
             ],
-            tags=card.tags,
+            tags=self._note_tags(card),
             guid=guid,
         )
 
@@ -272,42 +281,186 @@ class AnkiCardDeck:
         """
         return genanki.Note(
             model=self._cloze_model,
-            fields=[card.text, card.extra],
-            tags=card.tags,
+            fields=[card.text, self._format_cloze_extra(card)],
+            tags=self._note_tags(card),
             guid=guid,
         )
 
     @staticmethod
-    def _format_mcq_front(card: MCQCard) -> str:
+    def _note_tags(card: Card) -> list[str]:
+        """Return the card's tags plus a ``kind::<kind>`` tag when kind is set.
+
+        Parameters
+        ----------
+        card:
+            Source card.
+
+        Returns
+        -------
+        list[str]
+            Tags in authoring order, de-duplicated, with the kind tag last.
+        """
+        tags = list(dict.fromkeys(card.tags))
+        if card.kind and f"kind::{card.kind}" not in tags:
+            tags.append(f"kind::{card.kind}")
+        return tags
+
+    @staticmethod
+    def _render_feedback(explanation: str, source: str) -> str:
+        """Render the shared explanation + source footer used on card backs.
+
+        Parameters
+        ----------
+        explanation:
+            Feedback text (may contain HTML/MathJax). Empty to omit.
+        source:
+            Citation. Rendered small and muted, as metadata. Empty to omit.
+
+        Returns
+        -------
+        str
+            HTML fragment (possibly empty).
+        """
+        parts: list[str] = []
+        if explanation.strip():
+            parts.append(f"<div class='kunyi-explanation'><strong>Why:</strong> {explanation}</div>")
+        if source.strip():
+            parts.append(
+                "<div class='kunyi-source' style='font-size:0.8em;opacity:0.7;margin-top:0.6em'>"
+                f"Source: {html.escape(source.strip('[] '))}</div>"
+            )
+        return "".join(parts)
+
+    @classmethod
+    def _format_basic_back(cls, card: BasicCard) -> str:
+        """Render the back HTML for a BasicCard.
+
+        The graded answer comes first, then the pass criteria, then feedback,
+        so the learner grades against the answer rather than the explanation.
+
+        Parameters
+        ----------
+        card:
+            Source BasicCard.
+
+        Returns
+        -------
+        str
+            HTML string. Equal to ``card.back`` when the card has no
+            grading, explanation or source (v1 behaviour).
+        """
+        if not (card.grading or card.explanation.strip() or card.source.strip()):
+            return card.back
+        out = f"<div class='kunyi-answer'>{card.back}</div>"
+        if card.grading:
+            items = "".join(f"<li>{g}</li>" for g in card.grading)
+            out += (
+                "<div class='kunyi-grading' style='font-size:0.9em;margin-top:0.6em'>"
+                f"<strong>Counts as correct if:</strong><ul>{items}</ul></div>"
+            )
+        return out + cls._render_feedback(card.explanation, card.source)
+
+    @classmethod
+    def _format_cloze_extra(cls, card: ClozeCard) -> str:
+        """Render the Extra field for a ClozeCard.
+
+        Parameters
+        ----------
+        card:
+            Source ClozeCard.
+
+        Returns
+        -------
+        str
+            ``card.extra`` unchanged for v1 cards (no explanation/source);
+            otherwise the rendered explanation + source footer.
+        """
+        if not card.explanation.strip() and not card.source.strip():
+            return card.extra
+        explanation = card.explanation or card.extra
+        return cls._render_feedback(explanation, card.source)
+
+    @staticmethod
+    def _choice_order(card: MCQCard, seed: str | None) -> list[int]:
+        """Return a deterministic permutation of choice indices.
+
+        LLM-written MCQs almost always list the key first; rendering in file
+        order lets position alone answer the card. The order is seeded by the
+        note guid, so a rebuild never reshuffles a note the learner has seen,
+        while different notes get independent orders.
+
+        Parameters
+        ----------
+        card:
+            Source MCQCard.
+        seed:
+            Usually the note guid. Falls back to note_id, then the question.
+
+        Returns
+        -------
+        list[int]
+            Indices into ``card.choices`` in display order.
+        """
+        key = seed or card.note_id or card.question
+        order = list(range(len(card.choices)))
+        random.Random(f"kunyi-mcq:{key}").shuffle(order)
+        return order
+
+    @classmethod
+    def _format_mcq_front(cls, card: MCQCard, seed: str | None = None) -> str:
         """Render the front HTML for an MCQCard.
 
         Parameters
         ----------
         card:
             Source MCQCard.
+        seed:
+            Shuffle seed (the note guid when called from add_card).
 
         Returns
         -------
         str
-            HTML string: question stem followed by numbered choices.
+            HTML string: question stem followed by lettered, shuffled choices.
         """
-        numbered = "<br>".join(f"{i}. {c}" for i, c in enumerate(card.choices, 1))
-        return f"{card.question}<br><br>{numbered}"
+        order = cls._choice_order(card, seed)
+        lines = "<br>".join(
+            f"{chr(ord('A') + pos)}. {card.choices[i]}" for pos, i in enumerate(order)
+        )
+        return f"{card.question}<br><br>{lines}"
 
-    @staticmethod
-    def _format_mcq_back(card: MCQCard) -> str:
+    @classmethod
+    def _format_mcq_back(cls, card: MCQCard, seed: str | None = None) -> str:
         """Render the back HTML for an MCQCard.
 
         Parameters
         ----------
         card:
             Source MCQCard.
+        seed:
+            Shuffle seed; must match the one used for the front.
 
         Returns
         -------
         str
-            HTML string: bolded correct answer label followed by explanation.
+            HTML: correct letter and text, explanation, why each distractor
+            is wrong (when given), a grading reminder, and the source.
         """
-        answer_line = f"<strong>Correct answer:</strong> {card.correct_answer}<br><br>"
-        explanation_line = f"<strong>Explanation:</strong> {card.explanation}"
-        return answer_line + explanation_line
+        order = cls._choice_order(card, seed)
+        key_pos = order.index(card.choices.index(card.correct_answer))
+        letter = chr(ord("A") + key_pos)
+        out = f"<strong>Correct answer:</strong> {letter}. {card.correct_answer}<br><br>"
+        out += f"<strong>Explanation:</strong> {card.explanation}"
+        if card.distractor_notes:
+            rows = "".join(
+                f"<li>{chr(ord('A') + pos)}. {card.distractor_notes[card.choices[i]]}</li>"
+                for pos, i in enumerate(order)
+                if card.choices[i] in card.distractor_notes
+            )
+            out += f"<div style='margin-top:0.6em'><strong>Why the others are wrong:</strong><ul>{rows}</ul></div>"
+        out += (
+            "<div style='font-size:0.85em;opacity:0.75;margin-top:0.6em'>"
+            "If you guessed or got there only by elimination, press Again.</div>"
+        )
+        if card.source.strip():
+            out += cls._render_feedback("", card.source)
+        return out

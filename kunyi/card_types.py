@@ -1,8 +1,17 @@
 """Card type dataclasses for kunyi.
 
-Each dataclass is a pure data container with no genanki dependency.
-Optional fields (tags, media_paths) are reserved for future use and map
-directly to genanki.Note(tags=...) and genanki.Package(media_files=...).
+Each dataclass is a pure data container with no genanki dependency. All
+three types share the same optional metadata:
+
+- ``note_id``: stable author-facing identifier (JSON ``id``). Drives the
+  note guid when no explicit ``guid`` is given.
+- ``guid``: explicit Anki note guid. Used to pin a note to an identity it
+  already has inside a user's collection (e.g. when migrating a deck whose
+  notes were originally identified by position), so its review history
+  survives edits, reordering and renaming of ``note_id``.
+- ``concept``: grouping key for cards about one idea (coverage/dedup).
+- ``kind``: cognitive task the card trains; one of ``CARD_KINDS``.
+- ``source``: citation, rendered as metadata rather than as content.
 """
 
 from __future__ import annotations
@@ -13,81 +22,107 @@ from pathlib import Path
 
 _CLOZE_PATTERN = re.compile(r"\{\{c\d+::.+?\}\}", re.DOTALL)
 
+#: Allowed values for the ``kind`` field (see README, "Card kinds").
+CARD_KINDS: frozenset[str] = frozenset(
+    {"recall", "explain", "apply", "construct", "compute", "discriminate"}
+)
+
+
+def _check_kind(kind: str | None, owner: str) -> None:
+    """Raise if kind is set but not one of CARD_KINDS.
+
+    Parameters
+    ----------
+    kind:
+        Candidate kind value, or None.
+    owner:
+        Class name used in the error message.
+    """
+    if kind is not None and kind not in CARD_KINDS:
+        raise ValueError(f"{owner}.kind {kind!r} is not one of {sorted(CARD_KINDS)}")
+
 
 @dataclass
 class BasicCard:
-    """A simple two-sided flashcard.
+    """A two-sided question/answer flashcard.
 
     Parameters
     ----------
     front:
-        Text rendered on the question side of the card.
+        Prompt rendered on the question side.
     back:
-        Text rendered on the answer side of the card.
-    tags:
-        Optional Anki tags attached to the note (e.g. ["chapter-3", "exam"]).
-    media_paths:
-        Optional paths to media files (images, audio) referenced by this card.
-        Collected at deck-save time and registered with the genanki Package.
-    note_id:
-        Optional stable identifier for this card (e.g. "basics-012"). When
-        set, kunyi.deck.AnkiCardDeck uses it to keep this card's Anki note
-        identity fixed across regenerations of the same deck, even if the
-        card is later reordered or other cards are inserted/removed around
-        it. If omitted, identity falls back to the card's position within
-        the file, which is only stable as long as that position doesn't
-        change. See AnkiCardDeck._note_guid for details.
+        Minimum complete answer rendered first on the answer side.
+    grading:
+        Optional pass criteria shown under the answer, so self-grading is
+        consistent from review to review.
+    explanation:
+        Optional feedback shown after the answer (why it is true, common
+        confusions). Not part of what must be recalled.
+    tags, media_paths, note_id, guid, concept, kind, source:
+        See the module docstring.
     """
 
     front: str
     back: str
+    grading: list[str] = field(default_factory=list)
+    explanation: str = ""
     tags: list[str] = field(default_factory=list)
     media_paths: list[Path] = field(default_factory=list)
     note_id: str | None = None
+    guid: str | None = None
+    concept: str | None = None
+    kind: str | None = None
+    source: str = ""
 
     def __post_init__(self) -> None:
-        """Validate that front and back are non-empty."""
+        """Validate that front and back are non-empty and kind is known."""
         if not self.front.strip():
             raise ValueError("BasicCard.front cannot be empty")
         if not self.back.strip():
             raise ValueError("BasicCard.back cannot be empty")
+        _check_kind(self.kind, "BasicCard")
 
 
 @dataclass
 class MCQCard:
     """A multiple-choice question card.
 
+    Choices are stored in authoring order; the correct answer may sit
+    anywhere (LLM output usually puts it first). ``AnkiCardDeck`` shuffles
+    the rendered order deterministically per note, so position never
+    reveals the key.
+
     Parameters
     ----------
     question:
         The question stem displayed on the front of the card.
     choices:
-        Ordered list of answer options shown below the question.
+        Answer options. Must contain ``correct_answer`` exactly once.
     correct_answer:
         The correct choice string; must be an element of *choices*.
-        Validated on construction so upstream LLM output is caught early.
     explanation:
-        Explanation of the correct answer displayed on the card back.
-    tags:
-        Optional Anki tags attached to the note.
-    media_paths:
-        Optional paths to media files referenced by this card.
-    note_id:
-        Optional stable identifier for this card. See BasicCard.note_id for
-        the full explanation of how kunyi uses it to preserve Anki note
-        identity across regenerations.
+        Why the correct answer is right, shown on the back.
+    distractor_notes:
+        Optional mapping from a wrong choice to why it is wrong.
+    tags, media_paths, note_id, guid, concept, kind, source:
+        See the module docstring.
     """
 
     question: str
     choices: list[str]
     correct_answer: str
     explanation: str
+    distractor_notes: dict[str, str] = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
     media_paths: list[Path] = field(default_factory=list)
     note_id: str | None = None
+    guid: str | None = None
+    concept: str | None = None
+    kind: str | None = None
+    source: str = ""
 
     def __post_init__(self) -> None:
-        """Validate the question, choices, and correct_answer."""
+        """Validate the question, choices, correct_answer and notes."""
         if not self.question.strip():
             raise ValueError("MCQCard.question cannot be empty")
         if not self.choices:
@@ -96,6 +131,12 @@ class MCQCard:
             raise ValueError(
                 f"correct_answer {self.correct_answer!r} is not in choices: {self.choices}"
             )
+        if self.choices.count(self.correct_answer) != 1:
+            raise ValueError("MCQCard.correct_answer appears more than once in choices")
+        unknown = set(self.distractor_notes) - set(self.choices)
+        if unknown:
+            raise ValueError(f"MCQCard.distractor_notes refers to unknown choices: {sorted(unknown)}")
+        _check_kind(self.kind, "MCQCard")
 
 
 @dataclass
@@ -105,28 +146,27 @@ class ClozeCard:
     Parameters
     ----------
     text:
-        The card text containing one or more cloze deletions, using Anki's
-        syntax: ``{{c1::answer}}`` or ``{{c1::answer::hint}}``. Multiple
-        deletions in one note share the same text and are numbered
-        ``c1``, ``c2``, etc.
+        Card text containing one or more deletions in Anki syntax:
+        ``{{c1::answer}}`` or ``{{c1::answer::hint}}``.
+    explanation:
+        Feedback shown on the back (why the fact holds).
     extra:
-        Optional context shown alongside the answer on the back of the card
-        (e.g. a fuller explanation).
-    tags:
-        Optional Anki tags attached to the note.
-    media_paths:
-        Optional paths to media files referenced by this card.
-    note_id:
-        Optional stable identifier for this card. See BasicCard.note_id for
-        the full explanation of how kunyi uses it to preserve Anki note
-        identity across regenerations.
+        Deprecated alias for *explanation*, kept for v1 JSON files. Used
+        only when *explanation* is empty.
+    tags, media_paths, note_id, guid, concept, kind, source:
+        See the module docstring.
     """
 
     text: str
+    explanation: str = ""
     extra: str = ""
     tags: list[str] = field(default_factory=list)
     media_paths: list[Path] = field(default_factory=list)
     note_id: str | None = None
+    guid: str | None = None
+    concept: str | None = None
+    kind: str | None = None
+    source: str = ""
 
     def __post_init__(self) -> None:
         """Validate that text is non-empty and contains a cloze deletion."""
@@ -137,3 +177,4 @@ class ClozeCard:
                 "ClozeCard.text has no cloze deletion "
                 f"(expected e.g. '{{{{c1::answer}}}}'): {self.text!r}"
             )
+        _check_kind(self.kind, "ClozeCard")

@@ -154,11 +154,33 @@ class TestMCQFormatting:
         result = AnkiCardDeck._format_mcq_front(valid_mcq)
         assert valid_mcq.question in result
 
-    def test_format_front_numbers_choices(self, valid_mcq: MCQCard) -> None:
-        result = AnkiCardDeck._format_mcq_front(valid_mcq)
-        assert "1. Central Processing Unit" in result
-        assert "2. Core Power Unit" in result
-        assert "3. Control Processing Unit" in result
+    def test_format_front_letters_every_choice_once(self, valid_mcq: MCQCard) -> None:
+        result = AnkiCardDeck._format_mcq_front(valid_mcq, seed="g1")
+        for choice in valid_mcq.choices:
+            assert result.count(f". {choice}") == 1
+        for letter in "ABC":
+            assert f"{letter}. " in result
+
+    def test_shuffle_is_deterministic_per_seed(self, valid_mcq: MCQCard) -> None:
+        a = AnkiCardDeck._format_mcq_front(valid_mcq, seed="same")
+        b = AnkiCardDeck._format_mcq_front(valid_mcq, seed="same")
+        assert a == b
+
+    def test_key_position_is_not_fixed(self) -> None:
+        # Key authored first in every card; rendered positions must vary.
+        positions = set()
+        for i in range(40):
+            card = MCQCard(question=f"Q{i}?", choices=["key", "d1", "d2", "d3"],
+                           correct_answer="key", explanation="because.")
+            order = AnkiCardDeck._choice_order(card, f"guid-{i}")
+            positions.add(order.index(0))
+        assert positions == {0, 1, 2, 3}
+
+    def test_back_letter_matches_front(self, valid_mcq: MCQCard) -> None:
+        front = AnkiCardDeck._format_mcq_front(valid_mcq, seed="x")
+        back = AnkiCardDeck._format_mcq_back(valid_mcq, seed="x")
+        letter = back.split("</strong> ")[1][0]
+        assert f"{letter}. {valid_mcq.correct_answer}" in front
 
     def test_format_back_contains_answer_and_explanation(self, valid_mcq: MCQCard) -> None:
         result = AnkiCardDeck._format_mcq_back(valid_mcq)
@@ -524,3 +546,105 @@ class TestAnkiConnect:
         monkeypatch.setattr(ankiconnect.urllib.request, "urlopen", refuse)
         with pytest.raises(ankiconnect.AnkiConnectError, match="Is Anki running"):
             ankiconnect.import_package(Path("deck.apkg"))
+
+
+# ---------------------------------------------------------------------------
+# Schema v2
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaV2:
+    def _write(self, tmp: Path, data: dict) -> Path:
+        path = tmp / "deck.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        return path
+
+    def test_parses_qa_mcq_cloze_and_retired(self, tmp_path: Path) -> None:
+        data = {
+            "schema_version": 2,
+            "cards": [
+                {"type": "qa", "id": "q1", "kind": "recall", "prompt": "P?", "answer": "A",
+                 "grading": ["g"], "explanation": "why it holds", "source": "Book 1.1"},
+                {"type": "mcq", "id": "m1", "kind": "discriminate", "question": "Which?",
+                 "answer": "right", "distractors": [{"text": "w1", "why_wrong": "no"}, "w2"],
+                 "explanation": "since."},
+                {"type": "cloze", "id": "c1", "text": "{{c1::X}} rule", "explanation": "e",
+                 "guid": "pinned-guid"},
+            ],
+            "retired": [{"type": "cloze", "guid": "old", "text": "{{c1::Old}}", "extra": "[x]"}],
+        }
+        cards = parse_json(self._write(tmp_path, data))
+        assert isinstance(cards[0], BasicCard) and cards[0].grading == ["g"]
+        assert isinstance(cards[1], MCQCard) and cards[1].choices[0] == "right"
+        assert cards[1].distractor_notes == {"w1": "no"}
+        assert cards[2].guid == "pinned-guid"
+        assert "kunyi::retired" in cards[3].tags
+
+    def test_explicit_guid_overrides_id(self) -> None:
+        deck = AnkiCardDeck("D")
+        card = ClozeCard(text="{{c1::A}}.", note_id="x", guid="abc123")
+        assert deck._note_guid(card, "cloze") == "abc123"
+
+    def test_kind_tag_added_and_invalid_kind_rejected(self) -> None:
+        card = BasicCard(front="Q", back="A", kind="explain", tags=["t"])
+        assert AnkiCardDeck._note_tags(card) == ["t", "kind::explain"]
+        with pytest.raises(ValueError, match="kind"):
+            BasicCard(front="Q", back="A", kind="memorise")
+
+    def test_v1_cloze_extra_unchanged(self, valid_cloze: ClozeCard) -> None:
+        assert AnkiCardDeck._format_cloze_extra(valid_cloze) == valid_cloze.extra
+
+    def test_basic_back_orders_answer_before_feedback(self) -> None:
+        card = BasicCard(front="Q", back="ANSWER", grading=["G"], explanation="WHY", source="S")
+        html_back = AnkiCardDeck._format_basic_back(card)
+        assert html_back.index("ANSWER") < html_back.index("G") < html_back.index("WHY")
+
+
+# ---------------------------------------------------------------------------
+# Lint
+# ---------------------------------------------------------------------------
+
+
+class TestLint:
+    def _rules(self, entry: dict) -> set[str]:
+        from kunyi.lint import lint_entries
+
+        return {f.rule for f in lint_entries([("f.json", entry)])}
+
+    def test_clean_qa_card_has_no_findings(self) -> None:
+        entry = {"type": "qa", "id": "a", "prompt": "Why is ker(T) a subspace?",
+                 "answer": "Closed under + and scalar multiples.",
+                 "explanation": "Linearity preserves T(v)=0 under both operations."}
+        assert self._rules(entry) == set()
+
+    def test_citation_only_explanation(self) -> None:
+        entry = {"type": "cloze", "id": "a", "text": "{{c1::Rank}} counts pivots.",
+                 "extra": "[Johnston, Thm 2.1]"}
+        assert "ALL-002" in self._rules(entry)
+
+    def test_cloze_leak_and_restatement(self) -> None:
+        entry = {"type": "cloze", "id": "a",
+                 "text": "The coordinate vector is {{c1::unique}} -- it is unique because B is independent.",
+                 "explanation": "Two representations would give a dependence relation."}
+        rules = self._rules(entry)
+        assert {"CLZ-001", "CLZ-013"} <= rules
+
+    def test_tex_brace_collision(self) -> None:
+        entry = {"type": "cloze", "id": "a", "text": "\\(A = {{c1::PDP^{-1}}}\\)",
+                 "explanation": "Diagonalisation factors A through its eigenbasis."}
+        assert "CLZ-014" in self._rules(entry)
+
+    def test_mcq_length_and_justification_cues(self) -> None:
+        entry = {"type": "mcq", "id": "a", "question": "Must T be surjective?",
+                 "answer": "Yes -- by rank-nullity the range has full dimension in W",
+                 "distractors": ["No", "Only if V = W", "Never"],
+                 "explanation": "Nullity zero forces rank equal to dim W."}
+        assert {"MCQ-010", "MCQ-012"} <= self._rules(entry)
+
+    def test_duplicate_ids(self) -> None:
+        from kunyi.lint import lint_entries
+
+        e = {"type": "qa", "id": "same", "prompt": "Why X?", "answer": "Y",
+             "explanation": "Long enough explanation."}
+        rules = {f.rule for f in lint_entries([("a.json", e), ("b.json", dict(e))])}
+        assert "ALL-003" in rules
